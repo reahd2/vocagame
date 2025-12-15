@@ -112,7 +112,6 @@ def get_words_by_range(book_name, start_chap, end_chap, selected_types=None):
 def get_book_champion(book_name):
     conn = get_connection()
     cursor = conn.cursor()
-    # 챕터 0인 경우만 챔피언으로 인정
     cursor.execute("""
         SELECT player_name, score, total_questions 
         FROM rankings 
@@ -270,9 +269,10 @@ if st.session_state['stage'] == 'setup':
                 selected_types = None
         
         with opt_col2:
-            target_count = st.radio(
+            # [수정] 시험 문제 수 옵션에 '전체' 추가
+            selected_count_opt = st.radio(
                 "시험 볼 단어 수",
-                [10, 20, 40],
+                ["10개", "20개", "40개", "전체"],
                 horizontal=True,
                 index=1 
             )
@@ -291,18 +291,28 @@ if st.session_state['stage'] == 'setup':
                 st.caption(f"선택 범위(Ch.{start_chapter}~Ch.{end_chapter}) 총 단어: {total_available}개")
                 
                 if st.button("🚀 게임 시작!", type="primary", use_container_width=True):
+                    
+                    # [수정] 선택된 옵션에 따라 목표 문제 수 결정
+                    if selected_count_opt == "전체":
+                        target_count = total_available
+                    else:
+                        # "10개" -> 10 정수 변환
+                        target_count = int(selected_count_opt.replace("개", ""))
+                    
+                    # 실제 문제 수 조정 (보유 단어보다 많이 설정했으면 전체 출제)
                     if total_available < target_count:
-                        st.toast(f"⚠️ 단어가 부족하여 {total_available}문제로 진행합니다.", icon="ℹ️")
+                        st.toast(f"⚠️ 단어가 부족하여 {total_available}문제(전체)로 진행합니다.", icon="ℹ️")
                         final_words = words_in_range
                         random.shuffle(final_words)
                     else:
+                        # 충분하면 랜덤 샘플링 (전체의 경우 target_count == total_available이므로 전체 셔플됨)
                         final_words = random.sample(words_in_range, target_count)
                     
                     st.session_state['words'] = final_words
                     st.session_state['total_q'] = len(final_words)
                     st.session_state['book'] = selected_book
                     
-                    # [핵심 로직] 랭킹 카테고리 결정
+                    # 랭킹 카테고리 결정
                     min_chap = min(chapters)
                     max_chap = max(chapters)
                     
