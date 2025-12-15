@@ -3,7 +3,6 @@ import sqlite3
 import random
 import time
 import pandas as pd
-import re
 
 # DB 파일 이름 설정
 DB_NAME = 'english_words_final.db'
@@ -13,7 +12,7 @@ def get_connection():
     return sqlite3.connect(DB_NAME, check_same_thread=False)
 
 def pick_random_meaning(text):
-    """뜻 여러 개 중 하나 랜덤 선택 (세미콜론 기준)"""
+    """뜻 여러 개 중 하나 랜덤 선택"""
     if not text:
         return ""
     parts = text.split(';')
@@ -39,7 +38,6 @@ def create_rankings_table():
         )
     ''')
     
-    # 컬럼 누락 확인 및 추가
     cursor.execute("PRAGMA table_info(rankings)")
     columns = [info[1] for info in cursor.fetchall()]
     if 'total_questions' not in columns:
@@ -48,6 +46,18 @@ def create_rankings_table():
         except sqlite3.OperationalError:
             pass
             
+    conn.commit()
+    conn.close()
+
+def clean_invalid_scores():
+    """DB 정화 함수"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE rankings 
+        SET score = total_questions 
+        WHERE score > total_questions
+    """)
     conn.commit()
     conn.close()
 
@@ -60,9 +70,10 @@ def get_books():
     return books
 
 def get_chapters(book_name):
+    """실제 챕터 번호만 가져오기 (0 제외)"""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT chapter FROM words WHERE book_name = ? ORDER BY chapter", (book_name,))
+    cursor.execute("SELECT DISTINCT chapter FROM words WHERE book_name = ? AND chapter != 0 ORDER BY chapter", (book_name,))
     chapters = [row[0] for row in cursor.fetchall()]
     conn.close()
     return chapters
@@ -75,17 +86,14 @@ def get_types(book_name):
     conn.close()
     return sorted([t for t in types if t])
 
-def get_words(book_name, chapter, selected_types=None):
+def get_words_by_range(book_name, start_chap, end_chap, selected_types=None):
+    """범위 내 단어 가져오기"""
     conn = get_connection()
     cursor = conn.cursor()
     
-    query = "SELECT english, korean, type FROM words WHERE book_name = ?"
-    params = [book_name]
+    query = "SELECT english, korean, type, chapter FROM words WHERE book_name = ? AND chapter >= ? AND chapter <= ?"
+    params = [book_name, start_chap, end_chap]
     
-    if chapter != 0:
-        query += " AND chapter = ?"
-        params.append(chapter)
-        
     if selected_types:
         placeholders = ','.join(['?'] * len(selected_types))
         query += f" AND type IN ({placeholders})"
@@ -96,18 +104,15 @@ def get_words(book_name, chapter, selected_types=None):
     conn.close()
     
     processed_words = []
-    for eng, kor, w_type in raw_words:
+    for eng, kor, w_type, chap in raw_words:
         random_kor = pick_random_meaning(kor)
-        processed_words.append((eng, random_kor, w_type))
+        processed_words.append((eng, random_kor, w_type, chap))
     return processed_words
 
 def get_book_champion(book_name):
-    """
-    통합 챔피언: 전체 챕터(0)에서 '절대 점수(score)'가 가장 높은 사람.
-    (문제를 많이 풀어서 많이 맞힌 사람이 유리하므로 공정함)
-    """
     conn = get_connection()
     cursor = conn.cursor()
+    # 챕터 0인 경우만 챔피언으로 인정
     cursor.execute("""
         SELECT player_name, score, total_questions 
         FROM rankings 
@@ -120,14 +125,12 @@ def get_book_champion(book_name):
     return row
 
 def save_score_if_best(name, book, chapter, score, total_q, time_taken):
-    """
-    [수정] 같은 챕터라도 '문제 수(total_questions)'가 다르면 별개의 기록으로 저장합니다.
-    예: 20문제 푼 기록 vs 40문제 푼 기록은 따로 관리됨.
-    """
+    if score > total_q:
+        score = total_q
+
     conn = get_connection()
     cursor = conn.cursor()
     
-    # 1. 개인 기록 확인 (이름, 책, 챕터, AND 문제수)
     cursor.execute("""
         SELECT id, score, time_taken FROM rankings 
         WHERE player_name = ? AND book_name = ? AND chapter = ? AND total_questions = ?
@@ -138,7 +141,6 @@ def save_score_if_best(name, book, chapter, score, total_q, time_taken):
     
     if row:
         existing_id, old_score, old_time = row
-        # 점수 갱신 조건
         if score > old_score or (score == old_score and time_taken < old_time):
             cursor.execute("""
                 UPDATE rankings 
@@ -153,7 +155,6 @@ def save_score_if_best(name, book, chapter, score, total_q, time_taken):
         """, (name, book, chapter, score, total_q, time_taken))
         should_update = True
     
-    # 2. TOP 10 관리 (해당 챕터 & 해당 문제 수 그룹 내에서만)
     if should_update:
         cursor.execute("""
             SELECT id FROM rankings 
@@ -165,7 +166,6 @@ def save_score_if_best(name, book, chapter, score, total_q, time_taken):
         
         if top_10_ids:
             placeholders = ','.join(['?'] * len(top_10_ids))
-            # 해당 그룹(문제 수) 내에서 10위 밖 삭제
             cursor.execute(f"""
                 DELETE FROM rankings 
                 WHERE book_name = ? AND chapter = ? AND total_questions = ? AND id NOT IN ({placeholders})
@@ -176,7 +176,6 @@ def save_score_if_best(name, book, chapter, score, total_q, time_taken):
     return should_update
 
 def get_existing_question_counts(book, chapter):
-    """해당 챕터의 랭킹 데이터에 존재하는 '문제 수' 종류를 가져옴 (예: [20, 30, 40])"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -189,7 +188,6 @@ def get_existing_question_counts(book, chapter):
     return counts
 
 def get_rankings(book, chapter, total_q):
-    """특정 문제 수(체급)에 해당하는 랭킹만 조회"""
     conn = get_connection()
     df = pd.read_sql_query("""
         SELECT 
@@ -208,24 +206,24 @@ def get_rankings(book, chapter, total_q):
 # --- 메인 앱 로직 ---
 st.set_page_config(page_title="SKY영어단어/Kevin", page_icon="⚡", layout="wide")
 
+create_rankings_table()
+clean_invalid_scores()
+
 if 'stage' not in st.session_state:
     st.session_state['stage'] = 'setup'
 if 'score' not in st.session_state:
     st.session_state['score'] = 0
 
-create_rankings_table()
-
-# [사이드바] 명예의 전당 (통합)
+# [사이드바]
 with st.sidebar:
     st.header("🏆 통합 챔피언 (전체 범위)")
-    st.caption("가장 많은 단어를 맞힌 1등!")
+    st.caption("모든 단원을 한 번에 통과한 자!")
     books_list = get_books()
     if books_list:
         for b in books_list:
             champ = get_book_champion(b)
             if champ:
                 name, sc, tot = champ
-                percent = int(sc * 100 / tot) if tot > 0 else 0
                 st.info(f"**{b}**\n\n👑 {name}\n({sc}점 / {tot}문제)")
             else:
                 st.caption(f"{b}: 아직 도전자가 없습니다.")
@@ -244,17 +242,16 @@ if st.session_state['stage'] == 'setup':
 
     if selected_book:
         with col2:
-            raw_chapters = get_chapters(selected_book)
-            chapter_options = [0] + raw_chapters
-            chapter_labels = ["전체 (ALL Chapters)"] + [f"Chapter {c}" for c in raw_chapters]
-            
-            selected_chapter_idx = st.selectbox(
-                "bookmark 챕터를 선택하세요", 
-                range(len(chapter_options)), 
-                format_func=lambda x: chapter_labels[x]
-            )
-            selected_chapter = chapter_options[selected_chapter_idx]
-
+            chapters = get_chapters(selected_book)
+            if not chapters:
+                st.error("이 책에는 챕터 정보가 없습니다.")
+            else:
+                c1, c2 = st.columns(2)
+                with c1:
+                    start_chapter = st.selectbox("시작 챕터 (Start)", chapters, index=0)
+                with c2:
+                    end_chapter = st.selectbox("끝 챕터 (End)", chapters, index=len(chapters)-1)
+        
         st.divider()
         
         st.subheader("⚙️ 시험 옵션 설정")
@@ -273,36 +270,66 @@ if st.session_state['stage'] == 'setup':
                 selected_types = None
         
         with opt_col2:
-            max_words = st.number_input(
-                "시험 볼 단어 수 (순위 경쟁을 위해 통일 추천)", 
-                min_value=10, max_value=200, value=40, step=10
+            target_count = st.radio(
+                "시험 볼 단어 수",
+                [10, 20, 40],
+                horizontal=True,
+                index=1 
             )
 
-        if st.button("🚀 게임 시작!", type="primary", use_container_width=True):
-            words = get_words(selected_book, selected_chapter, selected_types)
+        if not chapters:
+            st.warning("데이터가 부족합니다.")
+        elif start_chapter > end_chapter:
+            st.error("⚠️ 시작 챕터가 끝 챕터보다 클 수 없습니다.")
+        else:
+            words_in_range = get_words_by_range(selected_book, start_chapter, end_chapter, selected_types)
+            total_available = len(words_in_range)
             
-            if words:
-                if len(words) > max_words:
-                    words = random.sample(words, max_words)
-                else:
-                    random.shuffle(words)
-                
-                st.session_state['words'] = words
-                st.session_state['total_q'] = len(words)
-                st.session_state['book'] = selected_book
-                st.session_state['chapter'] = selected_chapter
-                st.session_state['score'] = 0
-                st.session_state['current_q'] = 0
-                st.session_state['start_time'] = time.time()
-                st.session_state['stage'] = 'playing'
-                
-                keys_to_remove = [k for k in st.session_state.keys() if k.startswith('options_')]
-                for k in keys_to_remove:
-                    del st.session_state[k]
-                    
-                st.rerun()
+            if total_available == 0:
+                st.warning("선택한 범위에 단어가 없습니다.")
             else:
-                st.error("선택한 조건에 해당하는 단어가 없습니다.")
+                st.caption(f"선택 범위(Ch.{start_chapter}~Ch.{end_chapter}) 총 단어: {total_available}개")
+                
+                if st.button("🚀 게임 시작!", type="primary", use_container_width=True):
+                    if total_available < target_count:
+                        st.toast(f"⚠️ 단어가 부족하여 {total_available}문제로 진행합니다.", icon="ℹ️")
+                        final_words = words_in_range
+                        random.shuffle(final_words)
+                    else:
+                        final_words = random.sample(words_in_range, target_count)
+                    
+                    st.session_state['words'] = final_words
+                    st.session_state['total_q'] = len(final_words)
+                    st.session_state['book'] = selected_book
+                    
+                    # [핵심 로직] 랭킹 카테고리 결정
+                    min_chap = min(chapters)
+                    max_chap = max(chapters)
+                    
+                    if start_chapter == end_chapter:
+                        # 1. 단일 챕터
+                        st.session_state['chapter'] = start_chapter
+                        st.session_state['rank_label'] = f"Chapter {start_chapter}"
+                    elif start_chapter == min_chap and end_chapter == max_chap:
+                        # 2. 전체 범위 (처음부터 끝까지) -> 통합 챔피언
+                        st.session_state['chapter'] = 0
+                        st.session_state['rank_label'] = "전체 (Integrated Champion)"
+                    else:
+                        # 3. 부분 범위 (커스텀) -> 통합 랭킹에 영향 주지 않도록 -1 등으로 분리
+                        st.session_state['chapter'] = -1
+                        st.session_state['rank_label'] = f"커스텀 범위 (Ch.{start_chapter}~{end_chapter})"
+                        
+                    st.session_state['score'] = 0
+                    st.session_state['current_q'] = 0
+                    st.session_state['start_time'] = time.time()
+                    st.session_state['solved_indexes'] = set()
+                    st.session_state['stage'] = 'playing'
+                    
+                    keys_to_remove = [k for k in st.session_state.keys() if k.startswith('options_')]
+                    for k in keys_to_remove:
+                        del st.session_state[k]
+                    
+                    st.rerun()
 
 # 2. 게임 진행 단계
 elif st.session_state['stage'] == 'playing':
@@ -316,10 +343,11 @@ elif st.session_state['stage'] == 'playing':
     english = current_word[0]
     correct_meaning = current_word[1]
     w_type = current_word[2]
+    w_chapter = current_word[3]
 
     st.markdown(f"<h1 style='text-align: center; color: #2e86de;'>{english}</h1>", unsafe_allow_html=True)
     if w_type:
-        st.markdown(f"<p style='text-align: center; color: gray;'>({w_type})</p>", unsafe_allow_html=True)
+        st.markdown(f"<p style='text-align: center; color: gray;'>({w_type} / Ch.{w_chapter})</p>", unsafe_allow_html=True)
     else:
         st.write("")
 
@@ -327,12 +355,19 @@ elif st.session_state['stage'] == 'playing':
         all_meanings = [w[1] for w in words]
         options = [correct_meaning]
         
-        while len(options) < 4 and len(all_meanings) >= 4:
-            wrong = random.choice(all_meanings)
-            if wrong not in options:
-                options.append(wrong)
+        loop_count = 0
         while len(options) < 4:
-            options.append("오답 보기 부족")
+            loop_count += 1
+            if len(all_meanings) > 1:
+                wrong = random.choice(all_meanings)
+                if wrong not in options:
+                    options.append(wrong)
+            else:
+                options.append("오답 데이터 부족")
+            
+            if loop_count > 20: 
+                while len(options) < 4: options.append("...")
+                break
             
         random.shuffle(options)
         st.session_state[f'options_{idx}'] = options
@@ -340,11 +375,17 @@ elif st.session_state['stage'] == 'playing':
     options = st.session_state[f'options_{idx}']
 
     def check_answer(selected):
+        if st.session_state['current_q'] in st.session_state['solved_indexes']:
+            return
+
+        st.session_state['solved_indexes'].add(st.session_state['current_q'])
+
         if selected == correct_meaning:
             st.session_state['score'] += 1
             st.toast("⭕ 정답입니다!", icon="✅")
         else:
             st.toast(f"❌ 틀렸습니다. 정답: {correct_meaning}", icon="⚠️")
+        
         time.sleep(0.5) 
         if st.session_state['current_q'] + 1 < st.session_state['total_q']:
             st.session_state['current_q'] += 1
@@ -377,6 +418,7 @@ elif st.session_state['stage'] == 'finished':
     st.markdown(f"<p style='text-align: center;'>걸린 시간: {total_time:.2f}초</p>", unsafe_allow_html=True)
 
     with st.form("ranking_form"):
+        st.write(f"**랭킹 등록 구간: {st.session_state.get('rank_label', 'Unknown')}**")
         name = st.text_input("순위 등록을 위한 이름(닉네임):")
         submitted = st.form_submit_button("기록 저장하기")
         
@@ -400,20 +442,25 @@ elif st.session_state['stage'] == 'finished':
                 st.session_state['stage'] = 'ranking'
                 st.rerun()
 
-# 4. 랭킹 확인 (수정됨: 체급별 필터링)
+# 4. 랭킹 확인
 elif st.session_state['stage'] == 'ranking':
-    chap_name = "전체 (All Chapters)" if st.session_state['chapter'] == 0 else f"Chapter {st.session_state['chapter']}"
+    # 표시용 라벨 처리
+    chap_code = st.session_state['chapter']
+    if chap_code == 0:
+        chap_display = "🏆 통합 챔피언 (전체 범위)"
+    elif chap_code == -1:
+        chap_display = "🛠️ 커스텀/부분 범위 (이벤트)"
+    else:
+        chap_display = f"Chapter {chap_code}"
     
-    st.subheader(f"🏆 [{st.session_state['book']} - {chap_name}] 명예의 전당")
+    st.subheader(f"📊 [{st.session_state['book']} - {chap_display}] 명예의 전당")
     
-    # DB에 저장된 문제 수 목록 가져오기 (예: 10개, 40개, 100개 등)
     counts = get_existing_question_counts(st.session_state['book'], st.session_state['chapter'])
     
     if not counts:
-        st.info("아직 등록된 랭킹이 없습니다.")
+        st.info("이 구간에는 아직 등록된 랭킹이 없습니다.")
     else:
-        # 방금 플레이한 문제 수가 있으면 그걸 기본값으로 선택
-        current_q = st.session_state.get('total_q', 40)
+        current_q = st.session_state.get('total_q', 20)
         default_idx = 0
         if current_q in counts:
             default_idx = counts.index(current_q)
