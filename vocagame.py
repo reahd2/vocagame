@@ -290,7 +290,7 @@ if st.session_state['stage'] == 'setup':
             else:
                 st.caption(f"선택 범위(Ch.{start_chapter}~Ch.{end_chapter}) 총 단어: {total_available}개")
                 
-                if st.button("🚀 게임 시작!", type="primary", use_container_width=True):
+                if st.button("🚀 게임 시작!", type="primary", width='stretch'):
                     
                     # [수정] 선택된 옵션에 따라 목표 문제 수 결정
                     if selected_count_opt == "전체":
