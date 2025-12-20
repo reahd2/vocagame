@@ -229,7 +229,7 @@ with st.sidebar:
     else:
         st.write("단어장 데이터가 없습니다.")
 
-st.title("⚡ SKY영어단어 / Kevin")
+st.title("⚡쑥쑥단어게임")
 
 # 1. 설정 단계
 if st.session_state['stage'] == 'setup':
