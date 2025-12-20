@@ -203,7 +203,7 @@ def get_rankings(book, chapter, total_q):
     return df
 
 # --- 메인 앱 로직 ---
-st.set_page_config(page_title="SKY영어단어/Kevin", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="쑥쑥단어게임", page_icon="⚡", layout="wide")
 
 create_rankings_table()
 clean_invalid_scores()
