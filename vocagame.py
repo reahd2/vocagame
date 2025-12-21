@@ -62,7 +62,7 @@ def clean_invalid_scores():
         WHERE score > total_questions AND total_questions > 0
     """)
     
-    # 2. total_questions가 0이거나 NULL인 경우 score로 채움 (최소한의 방어 로직)
+    # 2. total_questions가 0이거나 NULL인 경우 score로 채움
     cursor.execute("""
         UPDATE rankings
         SET total_questions = score
@@ -81,14 +81,12 @@ def get_books():
     return books
 
 def get_chapters(book_name):
-    """실제 챕터 번호만 가져오기 (0 제외) - 정수형 변환 보장"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT DISTINCT chapter FROM words WHERE book_name = ? AND chapter != 0", (book_name,))
     raw_chapters = cursor.fetchall()
     conn.close()
     
-    # 데이터를 정수로 확실하게 변환 후 정렬
     chapters = []
     for row in raw_chapters:
         try:
@@ -107,7 +105,6 @@ def get_types(book_name):
     return sorted([t for t in types if t])
 
 def get_words_by_range(book_name, start_chap, end_chap, selected_types=None):
-    """범위 내 단어 가져오기"""
     conn = get_connection()
     cursor = conn.cursor()
     
@@ -130,7 +127,6 @@ def get_words_by_range(book_name, start_chap, end_chap, selected_types=None):
     return processed_words
 
 def get_book_champion(book_name):
-    """통합 챔피언 조회"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -145,14 +141,12 @@ def get_book_champion(book_name):
     return row
 
 def save_score_if_best(name, book, chapter, score, total_q, time_taken):
-    """기록 저장 로직"""
     if score > total_q:
         score = total_q
 
     conn = get_connection()
     cursor = conn.cursor()
     
-    # 1. 내 기존 기록 확인 (같은 문제 수 체급 내에서)
     cursor.execute("""
         SELECT id, score, time_taken FROM rankings 
         WHERE player_name = ? AND book_name = ? AND chapter = ? AND total_questions = ?
@@ -163,7 +157,6 @@ def save_score_if_best(name, book, chapter, score, total_q, time_taken):
     
     if row:
         existing_id, old_score, old_time = row
-        # 점수가 더 높거나, 점수는 같은데 시간이 단축된 경우 업데이트
         if score > old_score or (score == old_score and time_taken < old_time):
             cursor.execute("""
                 UPDATE rankings 
@@ -172,14 +165,12 @@ def save_score_if_best(name, book, chapter, score, total_q, time_taken):
             """, (score, time_taken, existing_id))
             should_update = True
     else:
-        # 신규 기록
         cursor.execute("""
             INSERT INTO rankings (player_name, book_name, chapter, score, total_questions, time_taken)
             VALUES (?, ?, ?, ?, ?, ?)
         """, (name, book, chapter, score, total_q, time_taken))
         should_update = True
     
-    # 2. Top 10 유지
     if should_update:
         cursor.execute("""
             SELECT id FROM rankings 
@@ -201,7 +192,6 @@ def save_score_if_best(name, book, chapter, score, total_q, time_taken):
     return should_update
 
 def get_existing_question_counts(book, chapter):
-    """랭킹 확인 시 드롭다운 필터용"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -314,9 +304,12 @@ if st.session_state['stage'] == 'setup':
             if total_available == 0:
                 st.warning("선택한 범위에 단어가 없습니다.")
             else:
-                st.caption(f"선택 범위(Ch.{start_chapter}~Ch.{end_chapter}) 총 단어: {total_available}개")
+                st.write("") # 여백
+                st.info(f"✅ 선택 범위(Ch.{start_chapter}~Ch.{end_chapter})에서 총 {total_available}개의 단어가 검색되었습니다.")
                 
-                if st.button("🚀 게임 시작!", type="primary", width=True):
+                # [수정] 버튼을 컬럼 밖으로 꺼내서 넓게 배치
+                st.divider()
+                if st.button("🚀 게임 시작!", type="primary", use_container_width=True):
                     
                     if selected_count_opt == "전체":
                         target_count = total_available
@@ -361,7 +354,7 @@ if st.session_state['stage'] == 'setup':
                     
                     st.rerun()
 
-# 2. 게임 진행 단계 (수정됨: 멈춤 현상 해결)
+# 2. 게임 진행 단계 (버튼 멈춤 해결 & 디자인 개선)
 elif st.session_state['stage'] == 'playing':
     idx = st.session_state['current_q']
     words = st.session_state['words']
@@ -427,7 +420,7 @@ elif st.session_state['stage'] == 'playing':
     
     options = st.session_state[f'options_{idx}']
 
-    # 버튼 생성 (Key에 idx 포함 및 on_click 사용)
+    # 보기 버튼 배치
     col1, col2 = st.columns(2)
     with col1:
         st.button(f"1. {options[0]}", use_container_width=True, key=f"btn_{idx}_0", on_click=submit_answer, args=(options[0],))
