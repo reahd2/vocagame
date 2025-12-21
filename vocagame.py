@@ -141,12 +141,25 @@ def get_book_champion(book_name):
     return row
 
 def save_score_if_best(name, book, chapter, score, total_q, time_taken):
+    """
+    점수 저장 함수 (TypeError 방지 로직 추가됨)
+    """
+    # [중요] DB에 넣기 전 Python 기본 타입으로 강제 변환 (에러 방지 핵심)
+    try:
+        chapter = int(chapter)
+        score = int(score)
+        total_q = int(total_q)
+        time_taken = float(time_taken)
+    except ValueError:
+        return False # 변환 실패 시 저장 안함
+
     if score > total_q:
         score = total_q
 
     conn = get_connection()
     cursor = conn.cursor()
     
+    # 기존 기록 확인
     cursor.execute("""
         SELECT id, score, time_taken FROM rankings 
         WHERE player_name = ? AND book_name = ? AND chapter = ? AND total_questions = ?
@@ -157,6 +170,7 @@ def save_score_if_best(name, book, chapter, score, total_q, time_taken):
     
     if row:
         existing_id, old_score, old_time = row
+        # 점수가 더 높거나, 점수는 같은데 시간이 더 짧으면 갱신
         if score > old_score or (score == old_score and time_taken < old_time):
             cursor.execute("""
                 UPDATE rankings 
@@ -165,12 +179,14 @@ def save_score_if_best(name, book, chapter, score, total_q, time_taken):
             """, (score, time_taken, existing_id))
             should_update = True
     else:
+        # 신규 등록
         cursor.execute("""
             INSERT INTO rankings (player_name, book_name, chapter, score, total_questions, time_taken)
             VALUES (?, ?, ?, ?, ?, ?)
         """, (name, book, chapter, score, total_q, time_taken))
         should_update = True
     
+    # TOP 10 유지 관리 (나머지 삭제)
     if should_update:
         cursor.execute("""
             SELECT id FROM rankings 
@@ -234,17 +250,20 @@ if 'score' not in st.session_state:
 with st.sidebar:
     st.header("🏆 통합 챔피언 (전체 범위)")
     st.caption("가장 높은 점수와 가장 많은 문제를 푼 전설!")
-    books_list = get_books()
-    if books_list:
-        for b in books_list:
-            champ = get_book_champion(b)
-            if champ:
-                name, sc, tot = champ
-                st.info(f"**{b}**\n\n👑 {name}\n({sc}점 / {tot}문제)")
-            else:
-                st.caption(f"{b}: 아직 도전자가 없습니다.")
-    else:
-        st.write("단어장 데이터가 없습니다.")
+    try:
+        books_list = get_books()
+        if books_list:
+            for b in books_list:
+                champ = get_book_champion(b)
+                if champ:
+                    name, sc, tot = champ
+                    st.info(f"**{b}**\n\n👑 {name}\n({sc}점 / {tot}문제)")
+                else:
+                    st.caption(f"{b}: 아직 도전자가 없습니다.")
+        else:
+            st.write("단어장 데이터가 없습니다.")
+    except Exception:
+        st.error("DB 연결 오류")
 
 st.title("⚡쑥쑥단어게임")
 
@@ -307,7 +326,6 @@ if st.session_state['stage'] == 'setup':
                 st.write("") # 여백
                 st.info(f"✅ 선택 범위(Ch.{start_chapter}~Ch.{end_chapter})에서 총 {total_available}개의 단어가 검색되었습니다.")
                 
-                # [수정] 버튼을 컬럼 밖으로 꺼내서 넓게 배치
                 st.divider()
                 if st.button("🚀 게임 시작!", type="primary", use_container_width=True):
                     
@@ -354,7 +372,7 @@ if st.session_state['stage'] == 'setup':
                     
                     st.rerun()
 
-# 2. 게임 진행 단계 (버튼 멈춤 해결 & 디자인 개선)
+# 2. 게임 진행 단계
 elif st.session_state['stage'] == 'playing':
     idx = st.session_state['current_q']
     words = st.session_state['words']
