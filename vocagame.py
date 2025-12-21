@@ -32,12 +32,13 @@ def create_rankings_table():
             book_name TEXT,
             chapter INTEGER,
             score INTEGER,
-            total_questions INTEGER,
+            total_questions INTEGER DEFAULT 0,
             time_taken REAL,
             played_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
+    # total_questions 컬럼이 없는 구버전 DB 호환성 처리
     cursor.execute("PRAGMA table_info(rankings)")
     columns = [info[1] for info in cursor.fetchall()]
     if 'total_questions' not in columns:
@@ -50,14 +51,24 @@ def create_rankings_table():
     conn.close()
 
 def clean_invalid_scores():
-    """DB 정화 함수"""
+    """DB 정화 및 데이터 무결성 보장 함수"""
     conn = get_connection()
     cursor = conn.cursor()
+    
+    # 1. 점수가 총 문제보다 큰 경우 수정
     cursor.execute("""
         UPDATE rankings 
         SET score = total_questions 
-        WHERE score > total_questions
+        WHERE score > total_questions AND total_questions > 0
     """)
+    
+    # 2. total_questions가 0이거나 NULL인 경우 score로 채움 (최소한의 방어 로직)
+    cursor.execute("""
+        UPDATE rankings
+        SET total_questions = score
+        WHERE total_questions IS NULL OR total_questions = 0
+    """)
+    
     conn.commit()
     conn.close()
 
@@ -70,13 +81,22 @@ def get_books():
     return books
 
 def get_chapters(book_name):
-    """실제 챕터 번호만 가져오기 (0 제외)"""
+    """실제 챕터 번호만 가져오기 (0 제외) - 정수형 변환 보장"""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT chapter FROM words WHERE book_name = ? AND chapter != 0 ORDER BY chapter", (book_name,))
-    chapters = [row[0] for row in cursor.fetchall()]
+    cursor.execute("SELECT DISTINCT chapter FROM words WHERE book_name = ? AND chapter != 0", (book_name,))
+    raw_chapters = cursor.fetchall()
     conn.close()
-    return chapters
+    
+    # 데이터를 정수로 확실하게 변환 후 정렬
+    chapters = []
+    for row in raw_chapters:
+        try:
+            chapters.append(int(row[0]))
+        except (ValueError, TypeError):
+            continue
+            
+    return sorted(list(set(chapters)))
 
 def get_types(book_name):
     conn = get_connection()
@@ -110,13 +130,19 @@ def get_words_by_range(book_name, start_chap, end_chap, selected_types=None):
     return processed_words
 
 def get_book_champion(book_name):
+    """
+    통합 챔피언 조회 로직 개선:
+    1. Score(점수) 높은 순
+    2. Total Questions(푼 문제 수) 많은 순 (동점일 경우 더 많은 문제를 푼 사람이 위)
+    3. Time Taken(시간) 적은 순
+    """
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
         SELECT player_name, score, total_questions 
         FROM rankings 
         WHERE book_name = ? AND chapter = 0 
-        ORDER BY score DESC, time_taken ASC 
+        ORDER BY score DESC, total_questions DESC, time_taken ASC 
         LIMIT 1
     """, (book_name,))
     row = cursor.fetchone()
@@ -124,12 +150,19 @@ def get_book_champion(book_name):
     return row
 
 def save_score_if_best(name, book, chapter, score, total_q, time_taken):
+    """
+    기록 저장 로직:
+    같은 조건(책, 챕터, 문제 수)에서 본인의 최고 기록만 유지하고,
+    해당 조건의 Top 10만 남김.
+    """
+    # 안전장치: 점수가 문제 수보다 클 수 없음
     if score > total_q:
         score = total_q
 
     conn = get_connection()
     cursor = conn.cursor()
     
+    # 1. 내 기존 기록 확인 (같은 문제 수 체급 내에서)
     cursor.execute("""
         SELECT id, score, time_taken FROM rankings 
         WHERE player_name = ? AND book_name = ? AND chapter = ? AND total_questions = ?
@@ -140,6 +173,7 @@ def save_score_if_best(name, book, chapter, score, total_q, time_taken):
     
     if row:
         existing_id, old_score, old_time = row
+        # 점수가 더 높거나, 점수는 같은데 시간이 단축된 경우 업데이트
         if score > old_score or (score == old_score and time_taken < old_time):
             cursor.execute("""
                 UPDATE rankings 
@@ -148,12 +182,14 @@ def save_score_if_best(name, book, chapter, score, total_q, time_taken):
             """, (score, time_taken, existing_id))
             should_update = True
     else:
+        # 신규 기록
         cursor.execute("""
             INSERT INTO rankings (player_name, book_name, chapter, score, total_questions, time_taken)
             VALUES (?, ?, ?, ?, ?, ?)
         """, (name, book, chapter, score, total_q, time_taken))
         should_update = True
     
+    # 2. Top 10 유지 (해당 챕터, 해당 문제 수 체급 내에서)
     if should_update:
         cursor.execute("""
             SELECT id FROM rankings 
@@ -175,6 +211,7 @@ def save_score_if_best(name, book, chapter, score, total_q, time_taken):
     return should_update
 
 def get_existing_question_counts(book, chapter):
+    """랭킹 확인 시 드롭다운 필터용"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -206,7 +243,7 @@ def get_rankings(book, chapter, total_q):
 st.set_page_config(page_title="쑥쑥단어게임", page_icon="⚡", layout="wide")
 
 create_rankings_table()
-clean_invalid_scores()
+clean_invalid_scores()  # 실행 시마다 잘못된 데이터 자동 보정
 
 if 'stage' not in st.session_state:
     st.session_state['stage'] = 'setup'
@@ -216,7 +253,7 @@ if 'score' not in st.session_state:
 # [사이드바]
 with st.sidebar:
     st.header("🏆 통합 챔피언 (전체 범위)")
-    st.caption("모든 단원을 한 번에 통과한 자!")
+    st.caption("가장 높은 점수와 가장 많은 문제를 푼 전설!")
     books_list = get_books()
     if books_list:
         for b in books_list:
@@ -269,7 +306,6 @@ if st.session_state['stage'] == 'setup':
                 selected_types = None
         
         with opt_col2:
-            # [수정] 시험 문제 수 옵션에 '전체' 추가
             selected_count_opt = st.radio(
                 "시험 볼 단어 수",
                 ["10개", "20개", "40개", "전체"],
@@ -292,40 +328,34 @@ if st.session_state['stage'] == 'setup':
                 
                 if st.button("🚀 게임 시작!", type="primary", width='stretch'):
                     
-                    # [수정] 선택된 옵션에 따라 목표 문제 수 결정
                     if selected_count_opt == "전체":
                         target_count = total_available
                     else:
-                        # "10개" -> 10 정수 변환
                         target_count = int(selected_count_opt.replace("개", ""))
                     
-                    # 실제 문제 수 조정 (보유 단어보다 많이 설정했으면 전체 출제)
                     if total_available < target_count:
                         st.toast(f"⚠️ 단어가 부족하여 {total_available}문제(전체)로 진행합니다.", icon="ℹ️")
                         final_words = words_in_range
                         random.shuffle(final_words)
                     else:
-                        # 충분하면 랜덤 샘플링 (전체의 경우 target_count == total_available이므로 전체 셔플됨)
                         final_words = random.sample(words_in_range, target_count)
                     
                     st.session_state['words'] = final_words
                     st.session_state['total_q'] = len(final_words)
                     st.session_state['book'] = selected_book
                     
-                    # 랭킹 카테고리 결정
+                    # [핵심] 통합 챔피언 여부 판별 로직
                     min_chap = min(chapters)
                     max_chap = max(chapters)
                     
-                    if start_chapter == end_chapter:
-                        # 1. 단일 챕터
-                        st.session_state['chapter'] = start_chapter
-                        st.session_state['rank_label'] = f"Chapter {start_chapter}"
-                    elif start_chapter == min_chap and end_chapter == max_chap:
-                        # 2. 전체 범위 (처음부터 끝까지) -> 통합 챔피언
+                    if start_chapter == min_chap and end_chapter == max_chap:
+                        # 전체 범위 (Ch.1 ~ 끝) -> 통합 챔피언 자격 획득 (Chapter 0)
                         st.session_state['chapter'] = 0
                         st.session_state['rank_label'] = "전체 (Integrated Champion)"
+                    elif start_chapter == end_chapter:
+                        st.session_state['chapter'] = start_chapter
+                        st.session_state['rank_label'] = f"Chapter {start_chapter}"
                     else:
-                        # 3. 부분 범위 (커스텀) -> 통합 랭킹에 영향 주지 않도록 -1 등으로 분리
                         st.session_state['chapter'] = -1
                         st.session_state['rank_label'] = f"커스텀 범위 (Ch.{start_chapter}~{end_chapter})"
                         
@@ -335,13 +365,14 @@ if st.session_state['stage'] == 'setup':
                     st.session_state['solved_indexes'] = set()
                     st.session_state['stage'] = 'playing'
                     
+                    # 기존 옵션 키 삭제
                     keys_to_remove = [k for k in st.session_state.keys() if k.startswith('options_')]
                     for k in keys_to_remove:
                         del st.session_state[k]
                     
                     st.rerun()
 
-# 2. 게임 진행 단계
+# 2. 게임 진행 단계 (이전과 동일)
 elif st.session_state['stage'] == 'playing':
     idx = st.session_state['current_q']
     words = st.session_state['words']
@@ -429,6 +460,7 @@ elif st.session_state['stage'] == 'finished':
 
     with st.form("ranking_form"):
         st.write(f"**랭킹 등록 구간: {st.session_state.get('rank_label', 'Unknown')}**")
+        st.caption(f"문제 수 체급: {total_q}문제")
         name = st.text_input("순위 등록을 위한 이름(닉네임):")
         submitted = st.form_submit_button("기록 저장하기")
         
@@ -447,19 +479,18 @@ elif st.session_state['stage'] == 'finished':
                 if updated:
                     st.success("기록이 저장되었습니다!")
                 else:
-                    st.info("기존 최고 기록보다 낮아 갱신되지 않았습니다.")
+                    st.info("기존 최고 기록(동일 문제수 내)보다 낮아 갱신되지 않았습니다.")
                 
                 st.session_state['stage'] = 'ranking'
                 st.rerun()
 
 # 4. 랭킹 확인
 elif st.session_state['stage'] == 'ranking':
-    # 표시용 라벨 처리
     chap_code = st.session_state['chapter']
     if chap_code == 0:
         chap_display = "🏆 통합 챔피언 (전체 범위)"
     elif chap_code == -1:
-        chap_display = "🛠️ 커스텀/부분 범위 (이벤트)"
+        chap_display = "🛠️ 커스텀/부분 범위"
     else:
         chap_display = f"Chapter {chap_code}"
     
